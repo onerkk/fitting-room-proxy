@@ -14,7 +14,6 @@ app.post("/api/predict", async (req, res) => {
   if (!model || !input || !token) return res.status(400).json({ error: "missing" });
 
   try {
-    // 查模型版本
     const info = await fetch(`https://api.replicate.com/v1/models/${model}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
@@ -22,7 +21,6 @@ app.post("/api/predict", async (req, res) => {
     const ver = (await info.json()).latest_version?.id;
     if (!ver) return res.status(404).json({ error: "no version" });
 
-    // 建立預測（圖片直接傳，不做轉換）
     const r = await fetch("https://api.replicate.com/v1/predictions", {
       method: "POST",
       headers: {
@@ -36,7 +34,6 @@ app.post("/api/predict", async (req, res) => {
 
     let p = await r.json();
 
-    // 輪詢等完成
     if (p.status !== "succeeded" && p.status !== "failed") {
       for (let i = 0; i < 90; i++) {
         await new Promise(r => setTimeout(r, 2000));
@@ -46,7 +43,7 @@ app.post("/api/predict", async (req, res) => {
       }
     }
 
-    if (p.status === "failed") return res.status(500).json({ error: p.error || "失敗" });
+    if (p.status === "failed") return res.status(500).json({ error: p.error || "failed" });
     res.json({ output: p.output, status: p.status });
   } catch (e) {
     res.status(500).json({ error: e.message });
