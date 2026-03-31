@@ -9,23 +9,61 @@ app.use(express.json({ limit: "20mb" }));
 app.get("/", (req, res) => res.json({ status: "ok" }));
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
-// 把網址圖片轉成 base64
-async function urlToBase64(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error("圖片下載失敗: " + r.status);
-  const buf = await r.arrayBuffer();
-  const type = r.headers.get("content-type") || "image/jpeg";
-  const b64 = Buffer.from(buf).toString("base64");
-  return `data:${type};base64,${b64}`;
-}
+// 把 base64 或 URL 圖片上傳到 Replicate，拿回可用的網址
+async function uploadToReplicate(val, token) {
+  if (!val) return val;
 
-// 檢查是否為網址，是的話轉 base64
-async function resolveImage(val) {
-  if (typeof val === "string" && val.startsWith("http")) {
-    console.log("[下載圖片] " + val.substring(0, 80) + "...");
-    return await urlToBase64(val);
+  let buf, contentType;
+
+  if (typeof val === "string" && val.startsWith("data:")) {
+    // base64 data URI
+    const match = val.match(/^data:([^;]+);base64,(.+)$/);
+    if (!match) return val;
+    contentType = match[1];
+    buf = Buffer.from(match[2], "base64");
+  } else if (typeof val === "string" && val.startsWith("http")) {
+    // URL - 下載
+    console.log("[下載] " + val.substring(0, 60));
+    const r = await fetch(val);
+    if (!r.ok) return val;
+    contentType = r.headers.get("content-type") || "image/jpeg";
+    buf = Buffer.from(await r.arrayBuffer());
+  } else {
+    return val;
   }
-  return val;
+
+  // 上傳到 Replicate Files API
+  const ext = contentType.includes("png") ? "png" : "jpg";
+  const boundary = "----FormBoundary" + Date.now();
+  const header = `--${boundary}\r\nContent-Disposition: form-data; name="content"; filename="image.${ext}"\r\nContent-Type: ${contentType}\r\n\r\n`;
+  const footer = `\r\n--${boundary}--\r\n`;
+
+  const body = Buffer.concat([
+    Buffer.from(header),
+    buf,
+    Buffer.from(footer),
+  ]);
+
+  console.log("[上傳] " + (buf.length / 1024).toFixed(0) + "KB");
+
+  const r = await fetch("https://api.replicate.com/v1/files", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": `multipart/form-data; boundary=${boundary}`,
+    },
+    body,
+  });
+
+  if (!r.ok) {
+    console.error("[上傳失敗] " + r.status);
+    // 失敗就回傳原始值
+    return val;
+  }
+
+  const data = await r.json();
+  console.log("[上傳成功] " + data.urls?.get);
+  return data.urls?.get || val;
 }
 
 app.post("/api/predict", async (req, res) => {
@@ -33,11 +71,12 @@ app.post("/api/predict", async (req, res) => {
   if (!model || !input || !token) return res.status(400).json({ error: "missing" });
 
   try {
-    // 把所有圖片欄位的網址轉成 base64
+    // 圖片欄位上傳到 Replicate
     const resolved = { ...input };
-    for (const key of ["human_img", "garm_img", "mask_img", "image"]) {
+    const imgFields = ["human_img", "garm_img", "mask_img", "image"];
+    for (const key of imgFields) {
       if (resolved[key]) {
-        resolved[key] = await resolveImage(resolved[key]);
+        resolved[key] = await uploadToReplicate(resolved[key], token);
       }
     }
 
@@ -46,17 +85,13 @@ app.post("/api/predict", async (req, res) => {
     const info = await fetch(`https://api.replicate.com/v1/models/${model}`, {
       headers: { Authorization: `Bearer ${token}` },
     });
-
-    if (!info.ok) {
-      return res.status(info.status).json({ error: await info.text() });
-    }
+    if (!info.ok) return res.status(info.status).json({ error: await info.text() });
 
     const ver = (await info.json()).latest_version?.id;
-    if (!ver) return res.status(404).json({ error: "找不到模型版本" });
-
-    console.log("[版本] " + ver.substring(0, 12));
+    if (!ver) return res.status(404).json({ error: "找不到版本" });
 
     // 建立預測
+    console.log("[預測] 版本 " + ver.substring(0, 12));
     const r = await fetch("https://api.replicate.com/v1/predictions", {
       method: "POST",
       headers: {
@@ -70,9 +105,8 @@ app.post("/api/predict", async (req, res) => {
     if (!r.ok) return res.status(r.status).json({ error: await r.text() });
 
     let p = await r.json();
-    console.log("[狀態] " + p.id + ": " + p.status);
+    console.log("[狀態] " + p.status);
 
-    // 輪詢
     if (p.status !== "succeeded" && p.status !== "failed") {
       for (let i = 0; i < 90; i++) {
         await new Promise((r) => setTimeout(r, 2000));
