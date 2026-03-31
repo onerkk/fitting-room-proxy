@@ -11,49 +11,26 @@ app.get("/health", (req, res) => res.json({ status: "ok" }));
 
 app.post("/api/predict", async (req, res) => {
   const { model, input, token } = req.body;
-  if (!model || !input || !token) return res.status(400).json({ error: "缺少參數" });
-
+  if (!model || !input || !token) return res.status(400).json({ error: "missing" });
   try {
-    console.log(`[請求] ${model}`);
     const r = await fetch(`https://api.replicate.com/v1/models/${model}/predictions`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
-        Prefer: "wait=120",
-      },
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", Prefer: "wait=60" },
       body: JSON.stringify({ input }),
     });
-
-    if (!r.ok) {
-      const e = await r.text();
-      console.error(`[錯誤] ${r.status}: ${e}`);
-      return res.status(r.status).json({ error: e });
-    }
-
-    let pred = await r.json();
-    console.log(`[狀態] ${pred.id}: ${pred.status}`);
-
-    if (pred.status !== "succeeded" && pred.status !== "failed") {
+    if (!r.ok) return res.status(r.status).json({ error: await r.text() });
+    let p = await r.json();
+    if (p.status !== "succeeded" && p.status !== "failed") {
       for (let i = 0; i < 60; i++) {
-        await new Promise((r) => setTimeout(r, 2000));
-        const poll = await fetch(pred.urls.get, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        pred = await poll.json();
-        console.log(`[輪詢 ${i + 1}] ${pred.status}`);
-        if (pred.status === "succeeded" || pred.status === "failed") break;
+        await new Promise(r => setTimeout(r, 2000));
+        const poll = await fetch(p.urls.get, { headers: { Authorization: `Bearer ${token}` } });
+        p = await poll.json();
+        if (p.status === "succeeded" || p.status === "failed") break;
       }
     }
-
-    if (pred.status === "failed")
-      return res.status(500).json({ error: pred.error || "生成失敗" });
-
-    res.json({ output: pred.output, status: pred.status });
-  } catch (e) {
-    console.error(`[例外] ${e.message}`);
-    res.status(500).json({ error: e.message });
-  }
+    if (p.status === "failed") return res.status(500).json({ error: p.error });
+    res.json({ output: p.output, status: p.status });
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-app.listen(PORT, () => console.log(`代理伺服器啟動 port ${PORT}`));
+app.listen(PORT, () => console.log("proxy running on " + PORT));
